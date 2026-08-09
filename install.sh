@@ -65,7 +65,26 @@ case "$(uname -m)" in
 esac
 [ -n "$DOMAIN" ] || DOMAIN="$(hostname -f 2>/dev/null || hostname)"
 
+# Refuse a documentation domain. RFC 2606 reserves example.com/.org/.net and .example precisely so they
+# cannot resolve — so one here came from copying an instruction verbatim, and it does not fail loudly:
+# nginx has a single server block, which makes it the default for the port, so every request still
+# matches and the mistake hides. What it breaks is later and worse — `audiotams cert` asks a public CA
+# for a certificate for somebody else's name, and `upgrade` reads the domain back out of the site file
+# and re-applies it forever. Better to stop now and be told.
+case "$DOMAIN" in
+  *.example.com|example.com|*.example.org|example.org|*.example.net|example.net|*.example|*.invalid|*.test|localhost)
+    die ""$DOMAIN" is a documentation domain, not a hostname.
+
+  Pass the name people will actually type:
+      --domain audiotams.yourdomain.ie
+
+  If this is an upgrade, the placeholder is already in /etc/nginx/sites-available/audiotams and every
+  upgrade re-applies it — pass --domain once and it is corrected." ;;
+esac
+
 say "AudioTAMS installer — linux/$ARCH, serving as ${DOMAIN}"
+
+WORK_APT="$(mktemp)"
 
 # --- 1. packages -----------------------------------------------------------------------------------
 say "Installing what it needs"
@@ -73,13 +92,49 @@ PKGS="ca-certificates curl ffmpeg"
 [ "$WANT_NGINX" = 1 ] && PKGS="$PKGS nginx"
 [ "$WANT_FIREWALL" = 1 ] && PKGS="$PKGS ufw"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+
+# Ubuntu's mirrors publish AAAA records, so apt tries IPv6 first. On a host with no IPv6 route — an EC2
+# instance in a subnet without it, which is the common case — every index fails with "Network is
+# unreachable" and the output is a wall of warnings that hides whatever else went wrong. Ask for IPv4
+# only when there is no IPv6 route to use.
+APT_OPTS=""
+if [ -z "$(ip -6 route show default 2>/dev/null)" ]; then
+  APT_OPTS="-o Acquire::ForceIPv4=true"
+  NO_IPV6=1
+fi
 # shellcheck disable=SC2086
-apt-get install -y -qq --no-install-recommends $PKGS >/dev/null
+apt-get $APT_OPTS update -qq 2>"$WORK_APT" || true
+grep -q "Failed to fetch\|Unable to connect" "$WORK_APT" 2>/dev/null && ARCHIVE_UNREACHABLE=1
+# shellcheck disable=SC2086
+apt-get $APT_OPTS install -y -qq --no-install-recommends $PKGS >/dev/null 2>&1 || true
+
+# Whether apt worked matters less than whether the things it was for are present. A restricted network
+# — no NAT, an egress policy, a proxy — makes apt fail noisily while the machine already has everything
+# needed, and burying that in forty lines of warnings helps nobody. So check for the tools themselves,
+# and only then decide whether this is a problem.
+MISSING=""
+command -v ffmpeg >/dev/null 2>&1 || MISSING="$MISSING ffmpeg"
+command -v ffprobe >/dev/null 2>&1 || MISSING="$MISSING ffprobe"
+[ "$WANT_NGINX" = 1 ] && { command -v nginx >/dev/null 2>&1 || MISSING="$MISSING nginx"; }
+if [ -n "$MISSING" ]; then
+  if [ "${ARCHIVE_UNREACHABLE:-0}" = 1 ]; then
+    die "cannot reach the Ubuntu archive, and this machine is missing:$MISSING
+
+  Nothing is installed. The release itself downloaded fine, so the network reaches GitHub but not
+  archive.ubuntu.com — usually an egress policy, a missing NAT route, or a proxy this shell does not
+  know about. Install those packages by whatever route this machine has, then run this again."
+  fi
+  die "these packages did not install:$MISSING"
+fi
+if [ "${ARCHIVE_UNREACHABLE:-0}" = 1 ]; then
+  warn "could not reach the Ubuntu archive — carrying on, because everything needed is already here"
+fi
 ok "ffmpeg $(ffmpeg -version 2>/dev/null | head -1 | awk '{print $3}')${WANT_NGINX:+, nginx}"
 
 # --- 2. the release --------------------------------------------------------------------------------
-WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+WORK="$(mktemp -d)"
+# One trap: a second `trap ... EXIT` silently replaces the first, so both temporaries go here.
+trap 'rm -rf "$WORK"; rm -f "$WORK_APT"' EXIT
 
 if [ -n "$FROM_DIR" ]; then
   say "Installing from $FROM_DIR"
@@ -243,3 +298,12 @@ cat <<SUMMARY
     Logs          sudo audiotams logs
 
 SUMMARY
+if [ "${NO_IPV6:-0}" = 1 ]; then
+  cat <<'IPV6'
+  This machine has no IPv6 route, so apt was told to use IPv4 for this run. To spare yourself the
+  same wall of warnings on every future apt command:
+
+    echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
+
+IPV6
+fi
