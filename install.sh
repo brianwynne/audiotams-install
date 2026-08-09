@@ -85,6 +85,9 @@ esac
 say "AudioTAMS installer — linux/$ARCH, serving as ${DOMAIN}"
 
 WORK_APT="$(mktemp)"
+WORK="$(mktemp -d)"
+# One trap: a second `trap ... EXIT` silently replaces the first, so both temporaries go here.
+trap 'rm -rf "$WORK"; rm -f "$WORK_APT"' EXIT
 
 # --- 1. packages -----------------------------------------------------------------------------------
 say "Installing what it needs"
@@ -105,6 +108,44 @@ fi
 # shellcheck disable=SC2086
 apt-get $APT_OPTS update -qq 2>"$WORK_APT" || true
 grep -q "Failed to fetch\|Unable to connect" "$WORK_APT" 2>/dev/null && ARCHIVE_UNREACHABLE=1
+# Ubuntu's mirrors are configured over plain HTTP, and a security group that allows 443 out and not 80
+# — a reasonable thing to build — blocks apt entirely while everything else works. The mirrors serve
+# the same content over HTTPS, so try that before giving up.
+#
+# Only when apt has ALREADY failed, only Ubuntu's own URIs (a third-party repository may not offer
+# HTTPS), with a backup and a rollback if it does not help. An installer should not rewrite a machine's
+# package sources as a matter of course; fixing the failure in front of it is a different thing.
+if [ "${ARCHIVE_UNREACHABLE:-0}" = 1 ]; then
+  SRCS=$(grep -rlE '^(URIs:|deb )\s*http://[^ ]*ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true)
+  if [ -n "$SRCS" ]; then
+    say "The archive is unreachable over HTTP — trying HTTPS"
+    # The rollback copy is per-run and lives in the scratch directory. It was a persistent .bak with
+    # `cp -n`, which meant a second run found the first run's backup, refused to overwrite it, and then
+    # "restored" content from a different day. A rollback that restores the wrong thing is worse than
+    # no rollback: it is a silent edit dressed as a safety net.
+    ROLLBACK="$WORK/apt-sources"; mkdir -p "$ROLLBACK"
+    i=0
+    for f in $SRCS; do i=$((i+1)); cp "$f" "$ROLLBACK/$i"; printf '%s\n' "$f" >> "$ROLLBACK/paths"; done
+    # shellcheck disable=SC2086
+    sed -i -E 's|http://([a-z0-9.-]*ubuntu\.com)|https://\1|g' $SRCS
+    : > "$WORK_APT"
+    # shellcheck disable=SC2086
+    apt-get $APT_OPTS update -qq 2>"$WORK_APT" || true
+    if grep -q "Failed to fetch\|Unable to connect" "$WORK_APT" 2>/dev/null; then
+      i=0
+      while IFS= read -r f; do i=$((i+1)); cp "$ROLLBACK/$i" "$f"; done < "$ROLLBACK/paths"
+      warn "HTTPS did not help either — the sources are exactly as they were"
+    else
+      ARCHIVE_UNREACHABLE=0
+      SWITCHED_HTTPS=1
+      # Only now, having established the switch works, leave the operator a copy of the original.
+      i=0
+      while IFS= read -r f; do i=$((i+1)); cp "$ROLLBACK/$i" "$f.audiotams-http.bak"; done < "$ROLLBACK/paths"
+      ok "switched Ubuntu's sources to HTTPS (originals kept as *.audiotams-http.bak)"
+    fi
+  fi
+fi
+
 # shellcheck disable=SC2086
 apt-get $APT_OPTS install -y -qq --no-install-recommends $PKGS >/dev/null 2>&1 || true
 
@@ -132,10 +173,6 @@ fi
 ok "ffmpeg $(ffmpeg -version 2>/dev/null | head -1 | awk '{print $3}')${WANT_NGINX:+, nginx}"
 
 # --- 2. the release --------------------------------------------------------------------------------
-WORK="$(mktemp -d)"
-# One trap: a second `trap ... EXIT` silently replaces the first, so both temporaries go here.
-trap 'rm -rf "$WORK"; rm -f "$WORK_APT"' EXIT
-
 if [ -n "$FROM_DIR" ]; then
   say "Installing from $FROM_DIR"
   [ -x "$FROM_DIR/audiotams" ] || die "no audiotams binary in $FROM_DIR"
@@ -306,4 +343,12 @@ if [ "${NO_IPV6:-0}" = 1 ]; then
     echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
 
 IPV6
+fi
+if [ "${SWITCHED_HTTPS:-0}" = 1 ]; then
+  cat <<'HTTPS'
+  Ubuntu's package sources were switched from HTTP to HTTPS, because port 80 outbound is closed on
+  this machine and apt could not reach the archive. Without it this box would take no security
+  updates at all, silently. The originals are beside them as *.audiotams-http.bak.
+
+HTTPS
 fi
