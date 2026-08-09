@@ -197,6 +197,9 @@ if [ "$WANT_NGINX" = 1 ]; then
   say "Putting nginx in front"
   install -d -m 0755 /etc/nginx/snippets /var/www/certbot
   install -m 0644 "$WORK/deploy/nginx-proxy-snippet.conf" /etc/nginx/snippets/audiotams-proxy.conf
+  # The map has to be at http level, so it goes in conf.d rather than in the site.
+  install -d -m 0755 /etc/nginx/conf.d
+  install -m 0644 "$WORK/deploy/nginx-forwarded-map.conf" /etc/nginx/conf.d/audiotams-forwarded.conf
   # Keep whichever variant is already in place: re-running must not undo `audiotams cert`.
   if grep -q "listen 443" /etc/nginx/sites-available/audiotams 2>/dev/null; then
     "$OPT_DIR/deploy/nginx-render.sh" "$OPT_DIR/deploy/nginx-site-tls.conf.template" \
