@@ -230,7 +230,15 @@ if ! id -u "$APP_USER" >/dev/null 2>&1; then
 fi
 install -d -m 0755 "$OPT_DIR" "$ETC_DIR"
 install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$LIB_DIR" "$LIB_DIR/data" "$LIB_DIR/tmp" "$LOG_DIR"
+# The Rotter ingest connector's volumes. Created whether or not ingest is enabled, so turning it on
+# later is a config edit and a systemctl enable, not a hunt for why it cannot write.
+# quarantine/ is separate from media/ deliberately: a recording preserved there must never be seen by
+# the retention sweep, and must never be mistaken for one still being replicated.
+install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$LIB_DIR/media" "$LIB_DIR/quarantine"
 install -m 0755 "$WORK/audiotams" "$OPT_DIR/audiotams"
+# Both executables, from the same bundle, at the same version. The process that writes the media
+# volume and the one that reads it are two halves of one agreement about where recordings live.
+[ -f "$WORK/audiotams-ingest" ] && install -m 0755 "$WORK/audiotams-ingest" "$OPT_DIR/audiotams-ingest"
 printf '%s\n' "$VERSION" > "$OPT_DIR/VERSION"
 # The templates travel with the install: `audiotams cert` renders the TLS site from them later, and it
 # must use the ones that shipped with THIS binary rather than whatever a newer master branch has.
@@ -242,6 +250,9 @@ install -m 0755 "$WORK/deploy/nginx-render.sh" "$OPT_DIR/deploy/nginx-render.sh"
 # should not have to find the repository to learn what `upgrade` does to their config.
 install -d -m 0755 "$OPT_DIR/docs"
 [ -f "$WORK/deploy/INSTALL.md" ] && install -m 0644 "$WORK/deploy/INSTALL.md" "$OPT_DIR/docs/INSTALL.md"
+# ...and the ingest connector's, which is the one an operator reads at 3am when the archive has
+# stopped growing. Same reason: a local file, not a repository they may not be able to reach.
+[ -f "$WORK/deploy/INGEST.md" ] && install -m 0644 "$WORK/deploy/INGEST.md" "$OPT_DIR/docs/INGEST.md"
 ok "$OPT_DIR (code) · $ETC_DIR (config) · $LIB_DIR (data) · $LOG_DIR (logs)"
 ok "service account $APP_USER — system, no login, owns only its data and logs"
 
@@ -269,6 +280,10 @@ ok "audiotams command installed; login banner added"
 # --- 5. service --------------------------------------------------------------------------------------
 say "Installing the service"
 install -m 0644 "$WORK/deploy/audiotams.service" /etc/systemd/system/audiotams.service
+# Installed, deliberately NOT enabled: ingest.enabled is false in a fresh config, and a service that
+# starts and exits every ten seconds is worse than one an operator turns on when they mean to.
+[ -f "$WORK/deploy/audiotams-ingest.service" ] && \
+  install -m 0644 "$WORK/deploy/audiotams-ingest.service" /etc/systemd/system/audiotams-ingest.service
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable audiotams >/dev/null 2>&1 || true
@@ -277,6 +292,18 @@ if [ -d /run/systemd/system ]; then
     sleep 2
     if systemctl is-active --quiet audiotams; then ok "running on 127.0.0.1:$PORT"
     else warn "the service did not come up — sudo audiotams logs"; fi
+    # The ingest connector is only ever restarted if the operator had already enabled it. An upgrade
+    # that left the OLD binary running would be worse than one that did nothing: it would go on
+    # writing the media volume while its replacement sat unused beside it, and the version the banner
+    # reports would not be the version doing the work.
+    if systemctl is-enabled --quiet audiotams-ingest 2>/dev/null; then
+      systemctl restart audiotams-ingest
+      sleep 1
+      if systemctl is-active --quiet audiotams-ingest; then ok "ingest connector restarted on the new build"
+      else warn "the ingest connector did not come back — sudo audiotams ingest logs"; fi
+    elif [ -x "$OPT_DIR/audiotams-ingest" ]; then
+      ok "ingest connector installed, not enabled — sudo audiotams ingest enable"
+    fi
   else
     ok "installed but not started (--no-start)"
   fi
@@ -335,6 +362,20 @@ cat <<SUMMARY
     Logs          sudo audiotams logs
 
 SUMMARY
+if [ -x "$OPT_DIR/audiotams-ingest" ] && ! systemctl is-enabled --quiet audiotams-ingest 2>/dev/null; then
+  cat <<INGEST
+  The Rotter ingest connector is installed and switched off. It copies the hourly radio recordings
+  onto this machine so they play from here rather than from the Rotters, keeps seven days, and
+  archives each completed hour to object storage. To turn it on:
+
+    sudo audiotams config                add your rotters under \`ingest:\`, set enabled: true
+    sudo audiotams ingest enable
+    audiotams ingest status
+
+  How it works, and what to do when it stops:  $OPT_DIR/docs/INGEST.md
+
+INGEST
+fi
 if [ "${NO_IPV6:-0}" = 1 ]; then
   cat <<'IPV6'
   This machine has no IPv6 route, so apt was told to use IPv4 for this run. To spare yourself the

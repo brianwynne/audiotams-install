@@ -40,13 +40,50 @@ in. The release job fails loudly if the secret is missing rather than publishing
 
 | | |
 |---|---|
-| `/opt/audiotams` | the binary, its version, and the templates the CLI renders from |
-| `/etc/audiotams/audiotams.yaml` | configuration — **written once, never overwritten by an upgrade** |
+| `/opt/audiotams` | **both** binaries (`audiotams`, `audiotams-ingest`), the version, and the templates the CLI renders from |
+| `/etc/audiotams/audiotams.yaml` | configuration — **written once, never overwritten by an upgrade** — read by both |
 | `/var/lib/audiotams/data` | the archive: sources, flows, media |
+| `/var/lib/audiotams/media` | the radio recordings. The ingest connector is the only writer |
+| `/var/lib/audiotams/quarantine` | recordings preserved rather than truncated — never swept by retention |
 | `/var/lib/audiotams/tmp` | render scratch |
 | `/var/log/audiotams/audiotams.log` | the log |
+| `/var/log/audiotams/ingest.log` | ...and the ingest connector's |
 | `/usr/local/bin/audiotams` | the management command |
 | `/etc/nginx/sites-available/audiotams` | the site, plus `snippets/audiotams-proxy.conf` |
+
+## The Rotter ingest connector
+
+Every release ships it and installs it **switched off**: a fresh config names no Rotters, and a
+service that starts and exits every ten seconds is worse than one an operator turns on when they mean
+to. Turn it on when you have somewhere to point it:
+
+```bash
+sudo audiotams config            # fill in the `ingest:` block the template already left you
+sudo audiotams ingest enable
+audiotams ingest status
+```
+
+Everything about it is a verb on the same command — `status`, `lag`, `logs`, `quarantine`, `enable`,
+`disable`, `start`, `stop`, `restart`, `once` — and `audiotams status` reports it alongside the API,
+so the ordinary "is everything up?" check covers both. The login banner shows whether it is running,
+the free space on the media volume, and a warning if anything is sitting in quarantine.
+
+It is a separate unit on purpose: it is the only writer of `/var/lib/audiotams/media`, and the API
+only reads it. That is what makes it impossible for two things to append to the same growing file.
+The unit is hardened the same way as `audiotams.service`, with a narrower `ReadWritePaths` — the media
+and quarantine directories and its own log, and **not** the API's data. `systemd-analyze security
+audiotams-ingest` rates it **1.5, "OK"**, the same as the main unit.
+
+An upgrade installs both binaries and **restarts the connector if you had enabled it**. Leaving the
+old one running would be worse than doing nothing: it would go on writing the media volume while its
+replacement sat unused beside it, and the version the banner reports would not be the version doing
+the work.
+
+`audiotams uninstall` removes both units. It keeps the recordings and anything in quarantine, as it
+keeps everything else under `/var/lib/audiotams`.
+
+See **[docs/ingest.md](../docs/ingest.md)** — installed on the machine as
+`/opt/audiotams/docs/INGEST.md` — for the mechanism and the full runbook.
 
 ## The service account
 
@@ -101,7 +138,19 @@ the service account locked, `systemd-analyze security` at 1.5, the firewall clos
 working, an upgrade leaving a hand-edited config and a hand-made file untouched, the HTTPS switch
 rendering and reloading, and an uninstall removing the service while keeping data and config.
 
-Two faults were found that way and would not have been found by reading:
+The ingest connector was added to that same test rather than asserted: installed from the bundle,
+enabled through `audiotams ingest enable`, replicating from a stand-in Rotter under systemd, its
+recordings written as the service account at 0640, its log where the unit says, `systemd-analyze
+security audiotams-ingest` at **1.5**, both services reported by `audiotams status`, the banner
+showing it, and an uninstall taking both units while keeping the recordings.
+
+One thing that check caught, and reading would not have: **an upgrade must restart the connector.**
+The installer put the new binary in place beside a running old one, which would have gone on writing
+the media volume while its replacement sat unused — and the banner would have reported the new
+version the whole time. The upgrade path now restarts it if it was enabled, and the test compares the
+service's PID either side to prove it.
+
+Two further faults were found the same way, on the original install path:
 
 * **`http2 on;` is a directive only from nginx 1.25.1.** Ubuntu 24.04 ships 1.24.0, where nginx refuses
   to start with `unknown directive "http2"`. `nginx-render.sh` now picks the form that matches the
