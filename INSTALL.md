@@ -156,6 +156,7 @@ the system can be finished without reading this document at all.
 |---|---|
 | set up sign-in for the first time | `sudo audiotams entra setup` |
 | **a new client secret** — the job that recurs | `sudo audiotams entra secret` |
+| correct the recorded expiry, without touching the secret | `sudo audiotams entra expires` |
 | change where Entra returns to (the server moved) | `sudo audiotams entra redirect` |
 | stop requiring sign-in, and put it back | `sudo audiotams entra off` / `on` |
 | what sign-in is configured, and until when | `audiotams entra` |
