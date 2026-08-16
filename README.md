@@ -44,4 +44,4 @@ source repository with every release, so the two cannot drift.
 
 Full installation and operations documentation: [INSTALL.md](INSTALL.md).
 
-Current release: `v1.0.0-rc11`
+Current release: `v1.0.0-rc12`

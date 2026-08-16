@@ -256,6 +256,11 @@ install -d -m 0755 "$OPT_DIR/docs"
 ok "$OPT_DIR (code) · $ETC_DIR (config) · $LIB_DIR (data) · $LOG_DIR (logs)"
 ok "service account $APP_USER — system, no login, owns only its data and logs"
 
+# Was this machine already running AudioTAMS before this run? The answer decides what the
+# authentication file below is allowed to say, so it has to be taken before the config is written.
+UPGRADE=no
+[ -f "$ETC_DIR/audiotams.yaml" ] && UPGRADE=yes
+
 # Config is written once. An upgrade must never edit what an operator has tuned.
 if [ ! -f "$ETC_DIR/audiotams.yaml" ]; then
   sed "s/__PORT__/$PORT/" "$WORK/deploy/audiotams.yaml.template" > "$ETC_DIR/audiotams.yaml"
@@ -267,11 +272,16 @@ fi
 # The environment file: where the authentication decision is written down, and later where the Entra
 # client secret goes. Written ONCE, like the config, and never edited by an upgrade.
 #
-# It is created saying "run open", because that is what this machine was already doing before the
-# upgrade that introduced it. The server refuses to start with neither Entra configured nor anonymous
-# access allowed — correct on its own terms, but an upgrade that silently turns a running service into
-# a stopped one is not a security improvement, it is an outage. So the decision is recorded here, in a
-# file an operator can read, and changing it is one edit.
+# What it says depends on whether this machine was ALREADY RUNNING, and the difference matters:
+#
+#   an UPGRADE inherits "run open", because that is what the box was doing five minutes ago. Turning a
+#   running service into a stopped one is an outage, not a security improvement, and the operator gets
+#   the same behaviour they had plus a file that now says so out loud.
+#
+#   a FRESH INSTALL inherits nothing, so it gets nothing. There is no running service to protect and
+#   no behaviour to preserve — writing "let everybody in as an Administrator" as the factory setting
+#   would hand every new machine an open archive and say so only in a log line. The server refuses to
+#   start until somebody chooses, which is a loud, visible failure on a box nobody is using yet.
 if [ ! -f "$ETC_DIR/audiotams.env" ]; then
   # Created with its permissions ALREADY on, then filled: a file that will hold a client secret must
   # never exist, even for an instant, at whatever the umask happened to be.
@@ -303,7 +313,7 @@ if [ ! -f "$ETC_DIR/audiotams.env" ]; then
 # Until then, this server signs nobody in: every visitor is treated as one anonymous user, and the
 # network around it is the only thing deciding who that can be. Comment this out once the four
 # settings above are filled in.
-AUDIOTAMS_ALLOW_ANONYMOUS=1
+__ANON__AUDIOTAMS_ALLOW_ANONYMOUS=1
 
 # What that anonymous visitor may do. Administrator by default, because this is also the switch an
 # administrator throws when Entra is unavailable and the work has to continue — a break-glass that
@@ -318,8 +328,16 @@ AUDIOTAMS_ALLOW_ANONYMOUS=1
 #   Publisher    ...and export and publish
 #   Administrator  ...and delete, and change the configuration
 #
-#AUDIOTAMS_ANONYMOUS_ROLE=Publisher
+__ANON__AUDIOTAMS_ANONYMOUS_ROLE=Administrator
 ENVFILE
+  # Written out rather than left to the default, so what an anonymous visitor may do is a line
+  # somebody can read rather than a fact about the binary.
+  if [ "$UPGRADE" = yes ]; then
+    sed -i 's/^__ANON__//' "$ETC_DIR/audiotams.env"
+    warn "this machine had no sign-in, so it still has none — see $ETC_DIR/audiotams.env"
+  else
+    sed -i 's/^__ANON__/#/' "$ETC_DIR/audiotams.env"
+  fi
   ok "wrote $ETC_DIR/audiotams.env — no sign-in yet; see it to add Entra"
 else
   ok "kept your existing $ETC_DIR/audiotams.env"
