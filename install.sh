@@ -264,6 +264,67 @@ if [ ! -f "$ETC_DIR/audiotams.yaml" ]; then
 else
   ok "kept your existing $ETC_DIR/audiotams.yaml"
 fi
+# The environment file: where the authentication decision is written down, and later where the Entra
+# client secret goes. Written ONCE, like the config, and never edited by an upgrade.
+#
+# It is created saying "run open", because that is what this machine was already doing before the
+# upgrade that introduced it. The server refuses to start with neither Entra configured nor anonymous
+# access allowed — correct on its own terms, but an upgrade that silently turns a running service into
+# a stopped one is not a security improvement, it is an outage. So the decision is recorded here, in a
+# file an operator can read, and changing it is one edit.
+if [ ! -f "$ETC_DIR/audiotams.env" ]; then
+  # Created with its permissions ALREADY on, then filled: a file that will hold a client secret must
+  # never exist, even for an instant, at whatever the umask happened to be.
+  install -m 0600 -o root -g root /dev/null "$ETC_DIR/audiotams.env"
+  cat > "$ETC_DIR/audiotams.env" <<'ENVFILE'
+# AudioTAMS environment. 0600, root-owned: this is where secrets go.
+#
+# YOU SHOULD NOT NEED TO EDIT THIS FILE. There is a command for each job, and each one asks you for
+# what it needs — which is the difference between a change somebody makes correctly at 3am and one
+# they make from memory:
+#
+#   sudo audiotams entra setup       first time: tenant, application, secret, redirect URI
+#   sudo audiotams entra secret      a new client secret — the job that recurs
+#   sudo audiotams entra redirect    change the address Entra returns to
+#   sudo audiotams entra off         stop requiring sign-in (and: on)
+#   audiotams entra                  what is configured, and when the secret runs out
+#
+# The login banner says which of those is outstanding, every time anybody logs in.
+#
+# Sign-in with Microsoft Entra ID. Set all four and sign-in becomes REQUIRED — there is no way to
+# have a tenant configured here and authentication quietly switched off. See docs/entra-setup.md.
+#
+#ENTRA_TENANT_ID=
+#ENTRA_CLIENT_ID=
+#ENTRA_CLIENT_SECRET=
+#ENTRA_REDIRECT_URI=https://your.domain/auth/callback
+#ENTRA_POST_LOGOUT_URI=https://your.domain/
+
+# Until then, this server signs nobody in: every visitor is treated as one anonymous user, and the
+# network around it is the only thing deciding who that can be. Comment this out once the four
+# settings above are filled in.
+AUDIOTAMS_ALLOW_ANONYMOUS=1
+
+# What that anonymous visitor may do. Administrator by default, because this is also the switch an
+# administrator throws when Entra is unavailable and the work has to continue — a break-glass that
+# leaves half the job impossible gets worked around instead of used.
+#
+# The permission table still applies either way, and everything done is still written to the audit
+# trail, as anonymous. Narrow it if the network in front of this server is broader than the set of
+# people who should be able to delete things:
+#
+#   Viewer       browse and listen
+#   Editor       ...and cut
+#   Publisher    ...and export and publish
+#   Administrator  ...and delete, and change the configuration
+#
+#AUDIOTAMS_ANONYMOUS_ROLE=Publisher
+ENVFILE
+  ok "wrote $ETC_DIR/audiotams.env — no sign-in yet; see it to add Entra"
+else
+  ok "kept your existing $ETC_DIR/audiotams.env"
+fi
+
 # Nothing to save: upgrades need no credential. An earlier version stored one here, so remove it —
 # a secret left on disk that nothing reads is a secret waiting to leak.
 if [ -f "$ETC_DIR/.github-token" ]; then
@@ -359,6 +420,7 @@ cat <<SUMMARY
     HTTPS         sudo audiotams cert $DOMAIN     ← the only step left
     Commands      audiotams help
     Config        $ETC_DIR/audiotams.yaml
+    Secrets       $ETC_DIR/audiotams.env          ← sign-in goes here; open until it does
     Logs          sudo audiotams logs
 
 SUMMARY
