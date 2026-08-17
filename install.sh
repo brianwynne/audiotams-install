@@ -190,18 +190,28 @@ else
     if [ -n "$TOKEN" ]; then curl -fsSL -H "Authorization: Bearer $TOKEN" "$@"
     else curl -fsSL "$@"; fi
   }
+  # An explicit --tag needs no API call at all: the asset URL is derivable from the tag, and the
+  # download itself proves the release exists. GitHub's surfaces fail independently — on 2026-08-17
+  # api.github.com was degraded and raw.githubusercontent.com returned 429 to everybody, while the
+  # release assets served perfectly — so every host this path does not need is a way it cannot fail.
   if [ -n "$TAG" ]; then
-    REL="$(api "https://api.github.com/repos/$REPO/releases/tags/$TAG")" || die "no release tagged $TAG in $REPO"
+    VERSION="$TAG"
   else
-    REL="$(api "https://api.github.com/repos/$REPO/releases/latest")" || die "cannot read the latest release of $REPO"
+    # "latest" is a judgement only GitHub can make, so this is the one path that still needs the API.
+    # It also skips pre-releases, which is why --tag is required until a stable release is cut.
+    REL="$(api "https://api.github.com/repos/$REPO/releases/latest")" \
+      || die "cannot read the latest release of $REPO. If GitHub's API is unavailable, name the version instead: --tag vX.Y.Z"
+    VERSION="$(printf '%s' "$REL" | grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    [ -n "$VERSION" ] || die "could not read a tag_name from the release"
   fi
-  VERSION="$(printf '%s' "$REL" | grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
-  [ -n "$VERSION" ] || die "could not read a tag_name from the release"
   ASSET="audiotams_${VERSION}_linux_${ARCH}.tar.gz"
   say "Fetching $VERSION ($ASSET)"
 
   BASE="https://github.com/$REPO/releases/download/$VERSION"
-  dl -o "$WORK/bundle.tar.gz" "$BASE/$ASSET" || die "release $VERSION has no asset named $ASSET"
+  # Nothing has vouched for the tag now, so this download is also where a typo is caught. Say both
+  # things it could be, because "no such asset" and "no such release" look identical from here.
+  dl -o "$WORK/bundle.tar.gz" "$BASE/$ASSET" \
+    || die "could not fetch $ASSET — check that $VERSION exists and was built for $ARCH: $BASE"
 
   # Checksums travel with the release; a bundle that does not match is not installed.
   if dl -o "$WORK/SHA256SUMS" "$BASE/SHA256SUMS" 2>/dev/null; then
