@@ -228,7 +228,7 @@ mounted either way; what changes is who the caller is taken to be, not whether a
 
 ```sh
 AUDIOTAMS_ALLOW_ANONYMOUS=1
-AUDIOTAMS_ANONYMOUS_ROLE=Publisher    # optional; Administrator by default
+AUDIOTAMS_ANONYMOUS_ROLE=Publisher    # optional; Viewer by default
 ```
 
 Everything done in that state is still written to the audit trail, attributed to `anonymous` and
@@ -249,10 +249,52 @@ Reverse it the same way when Entra returns. Two things worth knowing before you 
   cookies carrying claims, and validating one contacts nobody. Only NEW sign-ins fail, and they fail
   with a page that says so. The server also starts and runs normally while Entra is unreachable —
   discovery is lazy and retries — so a restart mid-outage is no longer a reason to break the glass.
-- **Anonymous is Administrator by default**, which means anyone who can reach the server can delete
-  archive content and change its configuration. On an internal-only host for a few hours that is a
-  reasonable trade and is the intended use. If the host is reachable more widely than the people who
-  should hold those rights, set `AUDIOTAMS_ANONYMOUS_ROLE` to something narrower first.
+- **Anonymous is Viewer by default**, so breaking the glass restores *access* and not destruction.
+  It used to be Administrator, which was a reasonable trade while a server was reachable only from
+  inside a building; on a public hostname it means the archive is open to anybody who finds the name,
+  deletion and configuration included. `AUDIOTAMS_ANONYMOUS_ROLE=Administrator` still does
+  everything, and having to say so is the point.
+
+## Unattended deployment
+
+`install.sh` asks nothing. Every choice is a flag, apt runs under `DEBIAN_FRONTEND=noninteractive`,
+and `ufw --force` skips its confirmation — so it can be driven by configuration management as it is.
+
+**But a fresh install deliberately does not come up**, because the server refuses to start until
+somebody has chosen how people sign in, and a first install inherits no choice to make for it. Left
+to itself, an automated run therefore ends with a dead service. As of rc16 the installer **exits
+non-zero** when that happens, so it fails visibly rather than reporting a success it did not achieve.
+
+The way to install unattended is to make the choice *before* the installer runs. `install.sh` writes
+`/etc/audiotams/audiotams.env` only if it is not already there, and otherwise leaves it alone:
+
+```bash
+install -d -m 0755 /etc/audiotams
+install -m 0600 -o root -g root /dev/null /etc/audiotams/audiotams.env
+cat > /etc/audiotams/audiotams.env <<'EOF'
+ENTRA_TENANT_ID=...
+ENTRA_CLIENT_ID=...
+ENTRA_CLIENT_SECRET=...
+ENTRA_REDIRECT_URI=https://radio.example.com/auth/callback
+EOF
+
+curl -fsSL .../install.sh | sudo bash -s -- --tag v1.0.0-rc16 --domain radio.example.com
+```
+
+The service comes up signed-in on first boot, and nothing is carried by hand afterwards. Write the
+file with mode 0600 **before** filling it, not after: it holds a client secret and must never exist,
+even for an instant, at whatever the umask happened to be.
+
+Three things worth knowing when this runs on somebody else's estate:
+
+- **`--no-firewall`** if the machine is already governed by nftables, firewalld, a cloud security
+  group or central policy. The installer opens 22, 80 and 443 and refuses to continue if ufw does not
+  come up — which is right when it owns the firewall and wrong when something else does.
+- **`--no-nginx`** if a proxy is already in front. Behind a Cloudflare Tunnel, 80 and 443 are open
+  for traffic that never arrives, since `cloudflared` dials out.
+- **HTTPS is the one step left**, because a certificate needs a name that resolves here. Where an
+  internal ACME server or configuration management writes the certificate instead,
+  `sudo audiotams cert watch` installs the reload watcher without issuing anything.
 
 ## Cutting a release
 

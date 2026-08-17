@@ -157,6 +157,10 @@ MISSING=""
 command -v ffmpeg >/dev/null 2>&1 || MISSING="$MISSING ffmpeg"
 command -v ffprobe >/dev/null 2>&1 || MISSING="$MISSING ffprobe"
 [ "$WANT_NGINX" = 1 ] && { command -v nginx >/dev/null 2>&1 || MISSING="$MISSING nginx"; }
+# ufw belongs in this list for a reason the others do not have: it is a SECURITY CONTROL, and the
+# firewall step below reported it as applied without ever checking. A missing ffmpeg announces itself
+# the first time anybody renders; a missing firewall announces itself to somebody else, later.
+[ "$WANT_FIREWALL" = 1 ] && { command -v ufw >/dev/null 2>&1 || MISSING="$MISSING ufw"; }
 if [ -n "$MISSING" ]; then
   if [ "${ARCHIVE_UNREACHABLE:-0}" = 1 ]; then
     die "cannot reach the Ubuntu archive, and this machine is missing:$MISSING
@@ -379,8 +383,32 @@ if [ -d /run/systemd/system ]; then
   if [ "$WANT_START" = 1 ]; then
     systemctl restart audiotams
     sleep 2
-    if systemctl is-active --quiet audiotams; then ok "running on 127.0.0.1:$PORT"
-    else warn "the service did not come up — sudo audiotams logs"; fi
+    if systemctl is-active --quiet audiotams; then
+      ok "running on 127.0.0.1:$PORT"
+    else
+      # A DEAD SERVICE IS A FAILED INSTALL, and this used to warn and exit 0. An operator watching the
+      # output sees the warning; configuration management sees only the exit code, and reported every
+      # one of these as a success. That is the worst property automation can have — and it is the exact
+      # shape a fresh unattended install takes, because the server deliberately refuses to start until
+      # somebody has chosen how people sign in.
+      #
+      # The journal's own words go in the message. "The service did not come up" sends somebody
+      # looking; "no authentication configured" tells them what to do.
+      # `|| true` is load-bearing: under `set -e` with pipefail, a grep that matches nothing exits 1
+      # and takes the whole script with it — killing the very message this line exists to produce, and
+      # leaving an operator with a bare non-zero exit and no idea why.
+      why="$(journalctl -u audiotams -n 12 --no-pager 2>/dev/null | grep -iE 'level=ERROR|fatal|refus|no authentication' | tail -2 || true)"
+      die "the service did not start.
+${why:+
+$why
+}
+  If this is a first install, that is most likely the authentication decision: the server will not
+  start until $ETC_DIR/audiotams.env either configures ENTRA_* or sets AUDIOTAMS_ALLOW_ANONYMOUS=1.
+  Choose with:  sudo audiotams entra setup      (or: sudo audiotams entra off)
+  Everything else is installed; nothing needs undoing before you re-run this.
+
+  Full log:  sudo audiotams logs"
+    fi
     # The ingest connector is only ever restarted if the operator had already enabled it. An upgrade
     # that left the OLD binary running would be worse than one that did nothing: it would go on
     # writing the media volume while its replacement sat unused beside it, and the version the banner
@@ -436,7 +464,28 @@ if [ "$WANT_FIREWALL" = 1 ]; then
   ufw allow 80/tcp  >/dev/null 2>&1 || true
   ufw allow 443/tcp >/dev/null 2>&1 || true
   ufw --force enable >/dev/null 2>&1 || true
-  ok "22, 80, 443 only — the application is on loopback and is not reachable directly"
+  # Ask the firewall whether it is running, rather than assuming the commands that were meant to start
+  # it did. Every line above ends in `|| true`, which is right — an install should not die because a
+  # rule was already there — but it means the only evidence this step worked is this check. Printing a
+  # tick because four commands were ISSUED is how a machine ends up with no firewall and a log saying
+  # it has one.
+  if ufw status 2>/dev/null | head -1 | grep -qi 'Status: active'; then
+    ok "22, 80 and 443 are open; everything else is refused. The application is on loopback."
+  else
+    die "the firewall did not come up, and this installer will not report a security control it cannot see.
+  Check:  ufw status
+  If this machine is firewalled by something else — nftables, firewalld, a cloud security group, or
+  central policy — that is a reasonable arrangement and this step is not wanted here. Re-run with
+  --no-firewall and let that policy stand on its own."
+  fi
+  # 80 and 443 suit the deployment where nginx faces the network. Behind a Cloudflare Tunnel nothing
+  # arrives on either — cloudflared dials OUT — so they are open for traffic that never comes. It is
+  # said rather than silently narrowed because this installer cannot tell which deployment it is in,
+  # and closing a port somebody is serving on would be the worse mistake.
+  if [ "$WANT_NGINX" = 0 ]; then
+    warn "80 and 443 are open but nothing here is listening on them — if this box is behind a tunnel,"
+    printf '           they are unused inbound surface. --no-firewall leaves your own policy in charge.\n'
+  fi
 fi
 
 # --- 8. what now ----------------------------------------------------------------------------------------
